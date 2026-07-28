@@ -17,8 +17,10 @@ public interface OrdersService extends IService<Orders> {
     OrderDetailVO getOrderDetail(Long id);
     void cancelOrder(CancelOrderDTO dto);
     void hideOrder(Long id);
-    void payOrder(Long id, PayOrderDTO dto);
+    Map<String, Object> payOrder(Long id, PayOrderDTO dto);
+    String h5Pay(Long id, String clientIp);
     List<OrderVO> consumerQueryList(Long lastId, Integer pageSize, Integer ordersStatus);
     Map<String, Object> getPayResult(Long id);
+    void handlePayNotify(String outTradeNo, String transactionId);
     OrderVO convertToOrderVO(Orders order);
 }

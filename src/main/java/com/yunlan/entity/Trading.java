@@ -16,6 +16,9 @@ public class Trading {
     private Integer status;
     private Integer payChannel;
     private Long tradingOrderNo;
+    private String clientIp;
+    private String placeOrderJson;
+    private String placeOrderMsg;
 
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;

@@ -44,6 +44,13 @@ yunlan:
   wechat:
     appid: wxd9a4e65fe0c9b67c
     secret: 653fb91360c82a504be35920f49e36db
+    pay:
+      app-id: wxd9a4e65fe0c9b67c
+      mch-id: "${WX_MCH_ID:your-mch-id}"
+      api-v3-key: "${WX_API_V3_KEY:your-api-v3-key}"
+      private-key-path: "${WX_PRIVATE_KEY_PATH:wechat/apiclient_key.pem}"
+      notify-url: "${WX_NOTIFY_URL:https://your-domain.com/pay/notify}"
+      domain: "${WX_DOMAIN:https://your-domain.com}"
 
 amap:
   key: "${AMAP_KEY:你的高德地图Web服务API Key}"

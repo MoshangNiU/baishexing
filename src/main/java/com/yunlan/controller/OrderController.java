@@ -63,10 +63,16 @@ public class OrderController {
     }
 
     @PutMapping("/pay/{id}")
-    @ApiOperation("支付订单")
-    public Result<Void> pay(@PathVariable Long id, @RequestBody PayOrderDTO dto) {
-        ordersService.payOrder(id, dto);
-        return Result.success();
+    @ApiOperation("支付订单（微信小程序JSAPI）")
+    public Result<Map<String, Object>> pay(@PathVariable Long id, @RequestBody PayOrderDTO dto) {
+        return Result.success(ordersService.payOrder(id, dto));
+    }
+
+    @PostMapping("/h5pay/{id}")
+    @ApiOperation("H5支付（返回MWEB URL）")
+    public Result<String> h5Pay(@PathVariable Long id, @RequestBody(required = false) PayOrderDTO dto) {
+        String clientIp = dto != null ? dto.getClientIp() : null;
+        return Result.success(ordersService.h5Pay(id, clientIp));
     }
 
     @GetMapping("/pay/{id}/result")

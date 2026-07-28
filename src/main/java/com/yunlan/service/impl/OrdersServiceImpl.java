@@ -1,41 +1,38 @@
 package com.yunlan.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.util.IdUtil;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.yunlan.config.WechatPayClient;
+import com.yunlan.config.WechatPayProperties;
 import com.yunlan.dto.CancelOrderDTO;
 import com.yunlan.dto.OrderDetailVO;
 import com.yunlan.dto.OrderVO;
 import com.yunlan.dto.PayOrderDTO;
 import com.yunlan.dto.PlaceOrderDTO;
-import com.yunlan.entity.AddressBook;
-import com.yunlan.entity.Coupon;
-import com.yunlan.entity.CouponActivity;
-import com.yunlan.entity.Orders;
-import com.yunlan.entity.ServeCategory;
-import com.yunlan.entity.ServeItem;
+import com.yunlan.entity.*;
 import com.yunlan.enums.OrderStatusEnum;
 import com.yunlan.mapper.OrdersMapper;
 import com.yunlan.mapper.CouponMapper;
 import com.yunlan.mapper.CouponActivityMapper;
-import com.yunlan.service.AddressBookService;
-import com.yunlan.service.OrdersService;
-import com.yunlan.service.ServeCategoryService;
-import com.yunlan.service.ServeItemService;
-import com.yunlan.service.NotificationService;
-import com.yunlan.service.DistributionService;
-import com.yunlan.service.UserService;
+import com.yunlan.service.*;
 import com.yunlan.utils.UserHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.Signature;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -65,6 +62,58 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
     @Resource
     private UserService userService;
 
+    @Resource
+    private TradingService tradingService;
+
+    @Resource
+    private WechatPayClient wechatPayClient;
+
+    @Resource
+    private WechatPayProperties wechatPayProperties;
+
+    private PrivateKey privateKey;
+
+    private PrivateKey getPrivateKey() {
+        if (privateKey != null) return privateKey;
+        try {
+            String keyContent = wechatPayProperties.getPrivateKeyContent();
+            if (keyContent == null || keyContent.isEmpty()) {
+                String path = wechatPayProperties.getPrivateKeyPath();
+                if (path != null && !path.isEmpty()) {
+                    java.io.InputStream is = getClass().getClassLoader().getResourceAsStream(path);
+                    if (is == null) is = getClass().getResourceAsStream(path);
+                    if (is != null) {
+                        keyContent = new java.io.BufferedReader(new java.io.InputStreamReader(is))
+                                .lines().collect(java.util.stream.Collectors.joining("\n"));
+                    }
+                }
+            }
+            String pem = keyContent
+                    .replace("-----BEGIN PRIVATE KEY-----", "")
+                    .replace("-----END PRIVATE KEY-----", "")
+                    .replaceAll("\\s", "");
+            byte[] encoded = Base64.getDecoder().decode(pem);
+            PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
+            KeyFactory kf = KeyFactory.getInstance("RSA");
+            privateKey = kf.generatePrivate(keySpec);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load WeChat Pay private key", e);
+        }
+        return privateKey;
+    }
+
+    private String buildPaySign(String appId, long timeStamp, String nonceStr, String packageStr) {
+        String message = appId + "\n" + timeStamp + "\n" + nonceStr + "\n" + packageStr + "\n";
+        try {
+            Signature sign = Signature.getInstance("SHA256withRSA");
+            sign.initSign(getPrivateKey());
+            sign.update(message.getBytes(StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(sign.sign());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate paySign", e);
+        }
+    }
+
     @Override
     @Transactional
     public Orders placeOrder(PlaceOrderDTO dto) {
@@ -80,7 +129,6 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         order.setStatus(OrderStatusEnum.PENDING_PAYMENT.getCode());
         order.setPaymentStatus(0);
 
-        // Calculate total amount from serve item price
         BigDecimal totalAmount = BigDecimal.ZERO;
         ServeItem item = serveItemService.getById(dto.getServeItemId());
         if (item != null && item.getPrice() != null) {
@@ -88,7 +136,6 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         }
         order.setTotalAmount(totalAmount);
 
-        // Calculate actual amount with coupon discount
         BigDecimal actualAmount = totalAmount;
         if (dto.getCouponId() != null) {
             try {
@@ -97,16 +144,13 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
                     CouponActivity act = couponActivityMapper.selectById(coupon.getActivityId());
                     if (act != null && act.getDiscountAmount() != null) {
                         actualAmount = totalAmount.subtract(act.getDiscountAmount());
-                        if (actualAmount.compareTo(BigDecimal.ZERO) < 0) {
-                            actualAmount = BigDecimal.ZERO;
-                        }
+                        if (actualAmount.compareTo(BigDecimal.ZERO) < 0) actualAmount = BigDecimal.ZERO;
                     }
                 }
             } catch (Exception ignored) {}
         }
         order.setActualAmount(actualAmount);
 
-        // 填充地址相关信息
         if (dto.getAddressId() != null) {
             AddressBook addr = addressBookService.getById(dto.getAddressId());
             if (addr != null) {
@@ -118,24 +162,16 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
             order.setContactsName(dto.getContactsName());
             order.setContactsPhone(dto.getContactsPhone());
         }
-        // 填充服务时间
         if (dto.getServeStartTime() != null) {
             order.setServeStartTime(dto.getServeStartTime());
         }
 
         this.save(order);
 
-        // Create notification for new order
         try {
-            notificationService.createNotification(
-                    userId,
-                    "订单已创建",
-                    "您的订单已创建，请尽快完成支付",
-                    "ORDER",
-                    order.getId()
-            );
-        } catch (Exception ignored) {
-        }
+            notificationService.createNotification(userId, "订单已创建",
+                    "您的订单已创建，请尽快完成支付", "ORDER", order.getId());
+        } catch (Exception ignored) {}
 
         return order;
     }
@@ -150,8 +186,7 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         if (ordersStatus != null) {
             wrapper.eq(Orders::getStatus, mapFrontendStatusToBackend(ordersStatus));
         }
-        List<Orders> orders = this.list(wrapper);
-        return orders.stream().map(this::convertToOrderVO).collect(Collectors.toList());
+        return this.list(wrapper).stream().map(this::convertToOrderVO).collect(Collectors.toList());
     }
 
     @Override
@@ -176,17 +211,10 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         order.setCancelTime(LocalDateTime.now());
         this.updateById(order);
 
-        // Notification for cancellation
         try {
-            notificationService.createNotification(
-                    userId,
-                    "订单已取消",
-                    "您的订单 #" + order.getId() + " 已成功取消",
-                    "ORDER",
-                    order.getId()
-            );
-        } catch (Exception ignored) {
-        }
+            notificationService.createNotification(userId, "订单已取消",
+                    "您的订单 #" + order.getId() + " 已成功取消", "ORDER", order.getId());
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -200,33 +228,190 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
 
     @Override
     @Transactional
-    public void payOrder(Long id, PayOrderDTO dto) {
+    public Map<String, Object> payOrder(Long id, PayOrderDTO dto) {
         Long userId = UserHolder.get();
         Orders order = this.getById(id);
         if (order == null || !order.getUserId().equals(userId)) {
             throw new IllegalArgumentException("订单不存在");
         }
-        // Apply coupon selected at payment time (overrides any coupon from placeOrder)
-        Long finalCouponId = order.getCouponId();
-        if (dto.getCouponId() != null) {
-            // Release previously applied coupon if different
-            if (finalCouponId != null && !finalCouponId.equals(dto.getCouponId())) {
-                try {
-                    Coupon oldCoupon = couponMapper.selectById(finalCouponId);
-                    if (oldCoupon != null && oldCoupon.getStatus() == 2) {
-                        oldCoupon.setStatus(1);
-                        couponMapper.updateById(oldCoupon);
-                    }
-                } catch (Exception ignored) {}
-            }
-            finalCouponId = dto.getCouponId();
-            order.setCouponId(finalCouponId);
+
+        Map<String, Object> result = new HashMap<>();
+        if (order.getPaymentStatus() == 1) {
+            result.put("payStatus", 1);
+            return result;
         }
+
+        // 获取openId（请求参数 → 用户表）
+        String openId = dto.getOpenId();
+        if (openId == null || openId.isEmpty()) {
+            User user = userService.getById(userId);
+            if (user != null) openId = user.getOpenid();
+        }
+        if (openId == null || openId.isEmpty()) {
+            throw new IllegalArgumentException("缺少微信openId");
+        }
+
+        // 计算实付金额（含优惠券）
+        BigDecimal actualAmount = computeActualAmount(order, dto.getCouponId());
+
+        // 调用微信支付JSAPI
+        Long tradingOrderNo = IdUtil.getSnowflakeNextId();
+        int totalFen = actualAmount.multiply(BigDecimal.valueOf(100)).intValue();
+
+        JSONObject wxReq = JSONUtil.createObj()
+                .set("mchid", wechatPayProperties.getMchId())
+                .set("appid", wechatPayProperties.getAppId())
+                .set("description", "服务订单-" + order.getId())
+                .set("notify_url", wechatPayProperties.getNotifyUrl())
+                .set("out_trade_no", String.valueOf(tradingOrderNo))
+                .set("amount", JSONUtil.createObj().set("total", totalFen).set("currency", "CNY"))
+                .set("payer", JSONUtil.createObj().set("openid", openId));
+
+        JSONObject wxResp = wechatPayClient.doPost("/v3/pay/transactions/jsapi", wxReq);
+        if (wxResp.getInt("_status_code") < 200 || wxResp.getInt("_status_code") >= 300) {
+            throw new RuntimeException("微信支付下单失败: " + wxResp);
+        }
+
+        String prepayId = wxResp.getStr("prepay_id");
+        String packageStr = "prepay_id=" + prepayId;
+        String nonceStr = IdUtil.fastSimpleUUID();
+        long timeStamp = System.currentTimeMillis() / 1000;
+        String paySign = buildPaySign(wechatPayProperties.getAppId(), timeStamp, nonceStr, packageStr);
+
+        JSONObject placeOrderJson = JSONUtil.createObj()
+                .set("timeStamp", String.valueOf(timeStamp))
+                .set("nonceStr", nonceStr)
+                .set("package", packageStr)
+                .set("signType", "RSA")
+                .set("paySign", paySign);
+
+        // 保存交易记录
+        Trading trading = new Trading();
+        trading.setOrderId(order.getId());
+        trading.setUserId(userId);
+        trading.setTotalAmount(actualAmount);
+        trading.setStatus(0);
+        trading.setPayChannel(1);
+        trading.setTradingOrderNo(tradingOrderNo);
+        trading.setPlaceOrderJson(placeOrderJson.toStringPretty());
+        tradingService.save(trading);
+
+        result.put("placeOrderJson", placeOrderJson.toStringPretty());
+        result.put("tradingOrderNo", String.valueOf(tradingOrderNo));
+        return result;
+    }
+
+    @Override
+    @Transactional
+    public String h5Pay(Long id, String clientIp) {
+        Long userId = UserHolder.get();
+        Orders order = this.getById(id);
+        if (order == null || !order.getUserId().equals(userId)) {
+            throw new IllegalArgumentException("订单不存在");
+        }
+        if (order.getPaymentStatus() == 1) return null;
+
+        if (clientIp == null || clientIp.isEmpty()) clientIp = "127.0.0.1";
+
+        BigDecimal actualAmount = order.getActualAmount();
+        if (actualAmount == null || actualAmount.compareTo(BigDecimal.ZERO) <= 0) {
+            actualAmount = order.getTotalAmount();
+        }
+
+        Long tradingOrderNo = IdUtil.getSnowflakeNextId();
+        int totalFen = actualAmount.multiply(BigDecimal.valueOf(100)).intValue();
+
+        JSONObject wxReq = JSONUtil.createObj()
+                .set("mchid", wechatPayProperties.getMchId())
+                .set("appid", wechatPayProperties.getAppId())
+                .set("description", "服务订单-" + order.getId())
+                .set("notify_url", wechatPayProperties.getNotifyUrl())
+                .set("out_trade_no", String.valueOf(tradingOrderNo))
+                .set("amount", JSONUtil.createObj().set("total", totalFen).set("currency", "CNY"))
+                .set("scene_info", JSONUtil.createObj()
+                        .set("payer_client_ip", clientIp)
+                        .set("h5_info", JSONUtil.createObj().set("type", "Wap")));
+
+        JSONObject wxResp = wechatPayClient.doPost("/v3/pay/transactions/h5", wxReq);
+        if (wxResp.getInt("_status_code") < 200 || wxResp.getInt("_status_code") >= 300) {
+            throw new RuntimeException("微信H5支付下单失败: " + wxResp);
+        }
+
+        String h5Url = wxResp.getStr("h5_url");
+
+        Trading trading = new Trading();
+        trading.setOrderId(order.getId());
+        trading.setUserId(userId);
+        trading.setTotalAmount(actualAmount);
+        trading.setStatus(0);
+        trading.setPayChannel(1);
+        trading.setTradingOrderNo(tradingOrderNo);
+        trading.setClientIp(clientIp);
+        trading.setPlaceOrderMsg(h5Url);
+        tradingService.save(trading);
+
+        return h5Url;
+    }
+
+    /**
+     * 微信支付异步通知处理
+     */
+    @Override
+    @Transactional
+    public void handlePayNotify(String outTradeNo, String transactionId) {
+        // outTradeNo 是 tradingOrderNo，从交易单反查订单
+        Trading trading = tradingService.getOne(
+                new LambdaQueryWrapper<Trading>().eq(Trading::getTradingOrderNo, outTradeNo), false);
+        if (trading == null) return;
+
+        Orders order = this.getById(trading.getOrderId());
+        if (order == null || order.getPaymentStatus() == 1) return;
+
+        Long userId = order.getUserId();
 
         order.setPaymentStatus(1);
         order.setStatus(OrderStatusEnum.PENDING_SERVICE.getCode());
+        this.updateById(order);
 
-        // Recalculate actual amount based on coupon at payment time
+        // 标记优惠券已使用
+        if (order.getCouponId() != null) {
+            try {
+                Coupon coupon = couponMapper.selectById(order.getCouponId());
+                if (coupon != null && coupon.getStatus() == 1) {
+                    coupon.setStatus(2);
+                    couponMapper.updateById(coupon);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 更新交易单状态
+        trading.setStatus(1);
+        tradingService.updateById(trading);
+
+        try {
+            notificationService.createNotification(userId, "支付成功",
+                    "您的订单 #" + order.getId() + " 已支付成功，等待安排服务", "ORDER", order.getId());
+        } catch (Exception ignored) {}
+
+        // 分销返利
+        try {
+            User currentUser = userService.getById(userId);
+            if (currentUser != null && currentUser.getInviterId() != null) {
+                BigDecimal rebateAmount = order.getActualAmount()
+                        .multiply(new BigDecimal("0.05"))
+                        .setScale(2, BigDecimal.ROUND_HALF_UP);
+                if (rebateAmount.compareTo(BigDecimal.ZERO) > 0) {
+                    distributionService.createRebateForOrder(
+                            order.getId(), userId, currentUser.getInviterId(), rebateAmount);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private BigDecimal computeActualAmount(Orders order, Long couponId) {
+        Long finalCouponId = order.getCouponId();
+        if (couponId != null) finalCouponId = couponId;
+
         BigDecimal actualAmount = order.getTotalAmount();
         if (finalCouponId != null) {
             try {
@@ -235,73 +420,12 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
                     CouponActivity act = couponActivityMapper.selectById(coupon.getActivityId());
                     if (act != null && act.getDiscountAmount() != null) {
                         actualAmount = order.getTotalAmount().subtract(act.getDiscountAmount());
-                        if (actualAmount.compareTo(BigDecimal.ZERO) < 0) {
-                            actualAmount = BigDecimal.ZERO;
-                        }
+                        if (actualAmount.compareTo(BigDecimal.ZERO) < 0) actualAmount = BigDecimal.ZERO;
                     }
                 }
             } catch (Exception ignored) {}
         }
-        order.setActualAmount(actualAmount);
-        this.updateById(order);
-
-        // Mark coupon as used
-        if (finalCouponId != null) {
-            try {
-                Coupon coupon = couponMapper.selectById(finalCouponId);
-                if (coupon != null && coupon.getStatus() == 1) {
-                    coupon.setStatus(2);
-                    couponMapper.updateById(coupon);
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        // Notification for payment success
-        try {
-            notificationService.createNotification(
-                    userId,
-                    "支付成功",
-                    "您的订单 #" + order.getId() + " 已支付成功，等待安排服务",
-                    "ORDER",
-                    order.getId()
-            );
-        } catch (Exception ignored) {
-        }
-
-        // Create rebate if user has inviter
-        try {
-            com.yunlan.entity.User currentUser = userService.getById(userId);
-            if (currentUser != null && currentUser.getInviterId() != null) {
-                BigDecimal rebateAmount = order.getActualAmount()
-                        .multiply(new BigDecimal("0.05"))
-                        .setScale(2, java.math.RoundingMode.HALF_UP);
-                if (rebateAmount.compareTo(BigDecimal.ZERO) > 0) {
-                    distributionService.createRebateForOrder(
-                            order.getId(), userId, currentUser.getInviterId(), rebateAmount
-                    );
-                }
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    @Override
-    public List<OrderVO> consumerQueryList(Long lastId, Integer pageSize, Integer ordersStatus) {
-        Long userId = UserHolder.get();
-        LambdaQueryWrapper<Orders> wrapper = new LambdaQueryWrapper<Orders>()
-                .eq(Orders::getUserId, userId)
-                .orderByDesc(Orders::getId);
-
-        if (lastId != null && lastId > 0) {
-            wrapper.lt(Orders::getId, lastId);
-        }
-        if (ordersStatus != null) {
-            wrapper.eq(Orders::getStatus, mapFrontendStatusToBackend(ordersStatus));
-        }
-        wrapper.last("LIMIT " + (pageSize != null ? pageSize : 10));
-        List<Orders> orders = this.list(wrapper);
-        return orders.stream().map(this::convertToOrderVO).collect(Collectors.toList());
+        return actualAmount;
     }
 
     @Override
@@ -311,9 +435,22 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         Map<String, Object> result = new HashMap<>();
         if (order != null && order.getUserId().equals(userId)) {
             result.put("status", order.getPaymentStatus());
-            result.put("payStatus", order.getPaymentStatus() == 1 ? "SUCCESS" : "PENDING");
+            result.put("payStatus", order.getPaymentStatus() == 1 ? 1 : 0);
         }
         return result;
+    }
+
+    @Override
+    public List<OrderVO> consumerQueryList(Long lastId, Integer pageSize, Integer ordersStatus) {
+        Long userId = UserHolder.get();
+        LambdaQueryWrapper<Orders> wrapper = new LambdaQueryWrapper<Orders>()
+                .eq(Orders::getUserId, userId)
+                .orderByDesc(Orders::getId);
+
+        if (lastId != null && lastId > 0) wrapper.lt(Orders::getId, lastId);
+        if (ordersStatus != null) wrapper.eq(Orders::getStatus, mapFrontendStatusToBackend(ordersStatus));
+        wrapper.last("LIMIT " + (pageSize != null ? pageSize : 10));
+        return this.list(wrapper).stream().map(this::convertToOrderVO).collect(Collectors.toList());
     }
 
     @Override
@@ -334,9 +471,9 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         vo.setCancelReason(order.getCancelReason());
         vo.setPrice(order.getTotalAmount());
         vo.setRealPayAmount(order.getActualAmount());
-        vo.setCreateTime(order.getCreateTime() != null ? order.getCreateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) : null);
+        vo.setCreateTime(order.getCreateTime() != null
+                ? order.getCreateTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) : null);
 
-        // 从关联表填充服务项信息
         if (order.getServeItemId() != null) {
             ServeItem item = serveItemService.getById(order.getServeItemId());
             if (item != null) {
@@ -347,9 +484,7 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         }
         if (order.getServeCategoryId() != null) {
             ServeCategory cat = serveCategoryService.getById(order.getServeCategoryId());
-            if (cat != null) {
-                vo.setServeTypeName(cat.getName());
-            }
+            if (cat != null) vo.setServeTypeName(cat.getName());
         }
         return vo;
     }
@@ -369,12 +504,12 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         vo.setServeActualEndTime(order.getServeActualEndTime());
         vo.setCancelReason(order.getCancelReason());
         vo.setRemarks(order.getRemarks());
-        vo.setCancelTime(order.getCancelTime() != null ? order.getCancelTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) : null);
+        vo.setCancelTime(order.getCancelTime() != null
+                ? order.getCancelTime().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) : null);
         vo.setPrice(order.getTotalAmount());
         vo.setRealPayAmount(order.getActualAmount());
         vo.setCreateTime(order.getCreateTime());
 
-        // 从关联表填充
         if (order.getServeItemId() != null) {
             ServeItem item = serveItemService.getById(order.getServeItemId());
             if (item != null) {
@@ -385,27 +520,20 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         }
         if (order.getServeCategoryId() != null) {
             ServeCategory cat = serveCategoryService.getById(order.getServeCategoryId());
-            if (cat != null) {
-                vo.setServeTypeName(cat.getName());
-            }
+            if (cat != null) vo.setServeTypeName(cat.getName());
         }
         return vo;
     }
 
-    /**
-     * 后端订单状态映射为前端订单状态
-     * 前端: 0待支付 100派单中 200待服务 300服务中 400待评价 500已完成 600已取消 700已关闭
-     * 后端: 0待支付 1待服务 2服务中 3已完成 4已取消
-     */
     private Integer mapBackendStatusToFrontend(Orders order) {
         Integer status = order.getStatus();
         Integer payStatus = order.getPaymentStatus();
-        if (status == 0) return 0;           // 待支付
-        if (status == 1 && payStatus == 1) return 200;  // 待服务(已支付)
-        if (status == 2) return 300;         // 服务中
-        if (status == 3) return 400;         // 待评价
-        if (status == 4) return 600;         // 已取消
-        if (status == 1 && payStatus == 0) return 100;  // 派单中
+        if (status == 0) return 0;
+        if (status == 1 && payStatus == 1) return 200;
+        if (status == 2) return 300;
+        if (status == 3) return 400;
+        if (status == 4) return 600;
+        if (status == 1 && payStatus == 0) return 100;
         return 0;
     }
 
