@@ -1,0 +1,11 @@
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/yunlan?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowMultiQueries=true
+    username: root
+    password: 031500linyu
+
+yunlan:
+  jwt:
+    secret: yunlan-jwt-secret-key-dev-must-be-at-least-32-chars
+    expire: 86400000
+  # WeChat config inherited from application.yml — do NOT override with placeholders here
