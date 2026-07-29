@@ -51,6 +51,10 @@ yunlan:
       private-key-path: "${WX_PRIVATE_KEY_PATH:wechat/apiclient_key.pem}"
       notify-url: "${WX_NOTIFY_URL:https://your-domain.com/pay/notify}"
       domain: "${WX_DOMAIN:https://your-domain.com}"
+      # 商户API证书序列号
+      # 获取方式：登录微信支付商户平台 → 账户中心 → API安全 → 查看证书
+      # 或使用 openssl x509 -in apiclient_cert.pem -noout -serial 命令查看
+      mch-serial-no: "${WX_MCH_SERIAL_NO:your-mch-serial-no}"
 
 amap:
   key: "${AMAP_KEY:你的高德地图Web服务API Key}"

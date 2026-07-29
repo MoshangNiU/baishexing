@@ -18,6 +18,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.PrivateKey;
 import java.security.Signature;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Base64;
 import java.util.stream.Collectors;
@@ -32,37 +34,59 @@ public class WechatPayClient {
     private WechatPayProperties properties;
 
     private PrivateKey privateKey;
+    private String serialNo;
 
     @PostConstruct
     public void init() {
         try {
-            String keyContent = properties.getPrivateKeyContent();
+            String keyContent = loadPrivateKeyContent();
             if (keyContent == null || keyContent.isEmpty()) {
-                String path = properties.getPrivateKeyPath();
-                if (path != null && !path.isEmpty()) {
-                    InputStream is = getClass().getClassLoader().getResourceAsStream(path);
-                    if (is == null) {
-                        is = getClass().getResourceAsStream(path);
-                    }
-                    if (is != null) {
-                        keyContent = new BufferedReader(new InputStreamReader(is))
-                                .lines().collect(Collectors.joining("\n"));
-                    }
-                }
+                log.warn("WeChat Pay private key not configured, payment will not work");
+                return;
             }
-            if (keyContent != null && !keyContent.isEmpty()) {
-                String pem = keyContent
-                        .replace("-----BEGIN PRIVATE KEY-----", "")
-                        .replace("-----END PRIVATE KEY-----", "")
-                        .replaceAll("\\s", "");
-                byte[] encoded = Base64.getDecoder().decode(pem);
-                PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
-                KeyFactory kf = KeyFactory.getInstance("RSA");
-                privateKey = kf.generatePrivate(keySpec);
+
+            // 解析PKCS8私钥
+            String pem = keyContent
+                    .replace("-----BEGIN PRIVATE KEY-----", "")
+                    .replace("-----END PRIVATE KEY-----", "")
+                    .replaceAll("\\s", "");
+            byte[] encoded = Base64.getDecoder().decode(pem);
+            PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
+            KeyFactory kf = KeyFactory.getInstance("RSA");
+            privateKey = kf.generatePrivate(keySpec);
+
+            // 商户证书序列号：优先使用配置中的，否则尝试从私钥推导（需配套证书）
+            // 注意：私钥本身不含序列号，序列号在配套的 X.509 证书中
+            // 这里从配置读取，开发时可在 application.yml 配置 mch-serial-no
+            serialNo = properties.getMchSerialNo();
+            if (serialNo == null || serialNo.isEmpty()) {
+                log.warn("WeChat Pay mchSerialNo not configured (yunlan.wechat.pay.mch-serial-no). " +
+                        "Get it from: 商户平台 → 账户中心 → API安全 → 查看证书");
+            } else {
+                log.info("WeChat Pay initialized. mchId={}, serialNo={}", properties.getMchId(), serialNo);
             }
         } catch (Exception e) {
-            log.error("Failed to load WeChat Pay private key", e);
+            log.error("Failed to init WechatPayClient", e);
         }
+    }
+
+    private String loadPrivateKeyContent() {
+        String keyContent = properties.getPrivateKeyContent();
+        if (keyContent != null && !keyContent.isEmpty()) {
+            return keyContent;
+        }
+        String path = properties.getPrivateKeyPath();
+        if (path != null && !path.isEmpty()) {
+            InputStream is = getClass().getClassLoader().getResourceAsStream(path);
+            if (is == null) {
+                is = getClass().getResourceAsStream(path);
+            }
+            if (is != null) {
+                return new BufferedReader(new InputStreamReader(is))
+                        .lines().collect(Collectors.joining("\n"));
+            }
+        }
+        return null;
     }
 
     private String buildSign(String method, String urlPath, String body, String nonce, long timestamp) {
@@ -78,6 +102,12 @@ public class WechatPayClient {
     }
 
     public JSONObject doPost(String urlPath, JSONObject body) {
+        if (privateKey == null) {
+            throw new RuntimeException("WeChat Pay private key not loaded, cannot call API: " + urlPath);
+        }
+        if (serialNo == null || serialNo.isEmpty()) {
+            throw new RuntimeException("WeChat Pay mchSerialNo not configured, cannot call API: " + urlPath);
+        }
         try {
             String bodyStr = body.toStringPretty();
             String nonce = IdUtil.fastSimpleUUID();
@@ -87,7 +117,7 @@ public class WechatPayClient {
                     + "mchid=\"" + properties.getMchId() + "\","
                     + "nonce_str=\"" + nonce + "\","
                     + "timestamp=\"" + timestamp + "\","
-                    + "serial_no=\"" + getSerialNo() + "\","
+                    + "serial_no=\"" + serialNo + "\","
                     + "signature=\"" + sign + "\"";
 
             URL url = new URL(BASE_URL + urlPath);
@@ -117,7 +147,7 @@ public class WechatPayClient {
                 }
             }
 
-            JSONObject result = JSONUtil.parseObj(responseBody);
+            JSONObject result = responseBody.isEmpty() ? new JSONObject() : JSONUtil.parseObj(responseBody);
             result.set("_status_code", code);
             return result;
         } catch (Exception e) {
@@ -125,13 +155,7 @@ public class WechatPayClient {
         }
     }
 
-    private String serialNo;
-
-    private String getSerialNo() {
-        return serialNo != null ? serialNo : "loading";
-    }
-
-    public void setSerialNo(String serialNo) {
-        this.serialNo = serialNo;
+    public WechatPayProperties getProperties() {
+        return properties;
     }
 }

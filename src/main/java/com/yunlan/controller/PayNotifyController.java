@@ -2,6 +2,8 @@ package com.yunlan.controller;
 
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.yunlan.config.WechatPayDecryptor;
+import com.yunlan.config.WechatPayProperties;
 import com.yunlan.service.OrdersService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +23,9 @@ public class PayNotifyController {
     @Resource
     private OrdersService ordersService;
 
+    @Resource
+    private WechatPayProperties wechatPayProperties;
+
     @PostMapping("/notify")
     public String handleNotify(HttpServletRequest request) {
         try {
@@ -29,28 +34,64 @@ public class PayNotifyController {
             JSONObject json = JSONUtil.parseObj(body);
 
             String eventType = json.getStr("event_type");
-            if ("TRANSACTION.SUCCESS".equals(eventType)) {
-                JSONObject resource = json.getJSONObject("resource");
-                if (resource != null) {
-                    String ciphertext = resource.getStr("ciphertext");
-                    JSONObject decrypt = JSONUtil.parseObj(ciphertext);
-                    String outTradeNo = decrypt.getStr("out_trade_no");
-                    String transactionId = decrypt.getStr("transaction_id");
-
-                    // 从tradingOrderNo反查orderId并处理
-                    ordersService.handlePayNotify(outTradeNo, transactionId);
-                }
+            if (!"TRANSACTION.SUCCESS".equals(eventType)) {
+                // 非支付成功通知（如退款通知），直接返回成功避免微信重试
+                log.info("Received non-success notify event_type={}", eventType);
+                return successResponse();
             }
-            return JSONUtil.createObj()
-                    .set("code", "SUCCESS")
-                    .set("message", "OK")
-                    .toStringPretty();
+
+            JSONObject resource = json.getJSONObject("resource");
+            if (resource == null) {
+                log.error("Pay notify missing resource field: {}", body);
+                return failResponse("missing resource");
+            }
+
+            // 微信支付回调密文参数
+            String ciphertext = resource.getStr("ciphertext");
+            String nonce = resource.getStr("nonce");
+            String associatedData = resource.getStr("associated_data");
+
+            // 使用 APIv3Key 做 AES-256-GCM 解密
+            String apiV3Key = wechatPayProperties.getApiV3Key();
+            if (apiV3Key == null || apiV3Key.isEmpty()) {
+                throw new RuntimeException("APIv3Key not configured (yunlan.wechat.pay.api-v3-key)");
+            }
+
+            String plainText = WechatPayDecryptor.decrypt(apiV3Key, associatedData, nonce, ciphertext);
+            JSONObject decrypt = JSONUtil.parseObj(plainText);
+
+            String outTradeNo = decrypt.getStr("out_trade_no");
+            String transactionId = decrypt.getStr("transaction_id");
+            String tradeState = decrypt.getStr("trade_state");
+
+            log.info("Pay notify decrypted: outTradeNo={}, transactionId={}, tradeState={}",
+                    outTradeNo, transactionId, tradeState);
+
+            // 仅在支付成功时处理订单
+            if ("SUCCESS".equals(tradeState)) {
+                ordersService.handlePayNotify(outTradeNo, transactionId);
+            } else {
+                log.warn("Pay notify trade_state is not SUCCESS: {}", tradeState);
+            }
+
+            return successResponse();
         } catch (Exception e) {
             log.error("Pay notify error", e);
-            return JSONUtil.createObj()
-                    .set("code", "FAIL")
-                    .set("message", e.getMessage())
-                    .toStringPretty();
+            return failResponse(e.getMessage());
         }
+    }
+
+    private String successResponse() {
+        return JSONUtil.createObj()
+                .set("code", "SUCCESS")
+                .set("message", "OK")
+                .toStringPretty();
+    }
+
+    private String failResponse(String message) {
+        return JSONUtil.createObj()
+                .set("code", "FAIL")
+                .set("message", message)
+                .toStringPretty();
     }
 }

@@ -20,6 +20,8 @@ import com.yunlan.mapper.CouponMapper;
 import com.yunlan.mapper.CouponActivityMapper;
 import com.yunlan.service.*;
 import com.yunlan.utils.UserHolder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,6 +39,8 @@ import java.util.stream.Collectors;
 
 @Service
 public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> implements OrdersService {
+
+    private static final Logger log = LoggerFactory.getLogger(OrdersServiceImpl.class);
 
     @Resource
     private ServeItemService serveItemService;
@@ -241,20 +245,20 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
             return result;
         }
 
-        // 获取openId（请求参数 → 用户表）
+        // 获取 openId：请求参数优先，否则从用户表读取
         String openId = dto.getOpenId();
         if (openId == null || openId.isEmpty()) {
             User user = userService.getById(userId);
             if (user != null) openId = user.getOpenid();
         }
         if (openId == null || openId.isEmpty()) {
-            throw new IllegalArgumentException("缺少微信openId");
+            throw new IllegalArgumentException("缺少微信openId，请在小程序环境登录");
         }
 
-        // 计算实付金额（含优惠券）
+        // 计算实付金额（含优惠券抵扣逻辑）
         BigDecimal actualAmount = computeActualAmount(order, dto.getCouponId());
 
-        // 调用微信支付JSAPI
+        // 调用微信支付 JSAPI 下单
         Long tradingOrderNo = IdUtil.getSnowflakeNextId();
         int totalFen = actualAmount.multiply(BigDecimal.valueOf(100)).intValue();
 
@@ -264,12 +268,14 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
                 .set("description", "服务订单-" + order.getId())
                 .set("notify_url", wechatPayProperties.getNotifyUrl())
                 .set("out_trade_no", String.valueOf(tradingOrderNo))
-                .set("amount", JSONUtil.createObj().set("total", totalFen).set("currency", "CNY"))
+                .set("amount", JSONUtil.createObj().set("total", Math.max(totalFen, 1)).set("currency", "CNY"))
                 .set("payer", JSONUtil.createObj().set("openid", openId));
 
         JSONObject wxResp = wechatPayClient.doPost("/v3/pay/transactions/jsapi", wxReq);
-        if (wxResp.getInt("_status_code") < 200 || wxResp.getInt("_status_code") >= 300) {
-            throw new RuntimeException("微信支付下单失败: " + wxResp);
+        int httpCode = wxResp.getInt("_status_code");
+        if (httpCode < 200 || httpCode >= 300) {
+            log.error("微信JSAPI下单失败, httpCode={}, resp={}", httpCode, wxResp);
+            throw new RuntimeException("微信支付下单失败: " + wxResp.getStr("message", "未知错误"));
         }
 
         String prepayId = wxResp.getStr("prepay_id");
@@ -285,7 +291,7 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
                 .set("signType", "RSA")
                 .set("paySign", paySign);
 
-        // 保存交易记录
+        // 保存交易记录（含 prepayId / tradeType 便于后续查询）
         Trading trading = new Trading();
         trading.setOrderId(order.getId());
         trading.setUserId(userId);
@@ -293,6 +299,8 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         trading.setStatus(0);
         trading.setPayChannel(1);
         trading.setTradingOrderNo(tradingOrderNo);
+        trading.setPrepayId(prepayId);
+        trading.setTradeType("JSAPI");
         trading.setPlaceOrderJson(placeOrderJson.toStringPretty());
         tradingService.save(trading);
 
@@ -313,10 +321,8 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
 
         if (clientIp == null || clientIp.isEmpty()) clientIp = "127.0.0.1";
 
-        BigDecimal actualAmount = order.getActualAmount();
-        if (actualAmount == null || actualAmount.compareTo(BigDecimal.ZERO) <= 0) {
-            actualAmount = order.getTotalAmount();
-        }
+        // 与 payOrder 保持一致的实付金额计算逻辑
+        BigDecimal actualAmount = computeActualAmount(order, null);
 
         Long tradingOrderNo = IdUtil.getSnowflakeNextId();
         int totalFen = actualAmount.multiply(BigDecimal.valueOf(100)).intValue();
@@ -327,14 +333,16 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
                 .set("description", "服务订单-" + order.getId())
                 .set("notify_url", wechatPayProperties.getNotifyUrl())
                 .set("out_trade_no", String.valueOf(tradingOrderNo))
-                .set("amount", JSONUtil.createObj().set("total", totalFen).set("currency", "CNY"))
+                .set("amount", JSONUtil.createObj().set("total", Math.max(totalFen, 1)).set("currency", "CNY"))
                 .set("scene_info", JSONUtil.createObj()
                         .set("payer_client_ip", clientIp)
                         .set("h5_info", JSONUtil.createObj().set("type", "Wap")));
 
         JSONObject wxResp = wechatPayClient.doPost("/v3/pay/transactions/h5", wxReq);
-        if (wxResp.getInt("_status_code") < 200 || wxResp.getInt("_status_code") >= 300) {
-            throw new RuntimeException("微信H5支付下单失败: " + wxResp);
+        int httpCode = wxResp.getInt("_status_code");
+        if (httpCode < 200 || httpCode >= 300) {
+            log.error("微信H5支付下单失败, httpCode={}, resp={}", httpCode, wxResp);
+            throw new RuntimeException("微信H5支付下单失败: " + wxResp.getStr("message", "未知错误"));
         }
 
         String h5Url = wxResp.getStr("h5_url");
@@ -347,6 +355,7 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
         trading.setPayChannel(1);
         trading.setTradingOrderNo(tradingOrderNo);
         trading.setClientIp(clientIp);
+        trading.setTradeType("MWEB");
         trading.setPlaceOrderMsg(h5Url);
         tradingService.save(trading);
 
@@ -355,25 +364,38 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
 
     /**
      * 微信支付异步通知处理
+     *
+     * @param outTradeNo    业务交易单号 = trading.trading_order_no
+     * @param transactionId 微信支付订单号，写入交易单用于后续对账
      */
     @Override
     @Transactional
     public void handlePayNotify(String outTradeNo, String transactionId) {
-        // outTradeNo 是 tradingOrderNo，从交易单反查订单
         Trading trading = tradingService.getOne(
                 new LambdaQueryWrapper<Trading>().eq(Trading::getTradingOrderNo, outTradeNo), false);
-        if (trading == null) return;
+        if (trading == null) {
+            log.warn("PayNotify: trading not found for outTradeNo={}", outTradeNo);
+            return;
+        }
 
         Orders order = this.getById(trading.getOrderId());
-        if (order == null || order.getPaymentStatus() == 1) return;
+        if (order == null) {
+            log.warn("PayNotify: order not found for trading.orderId={}", trading.getOrderId());
+            return;
+        }
+        if (order.getPaymentStatus() == 1) {
+            // 已处理过的回调（微信可能重复通知），直接返回 SUCCESS 避免重试
+            return;
+        }
 
         Long userId = order.getUserId();
 
+        // 1. 更新订单：支付状态 → 已支付，订单状态 → 待服务
         order.setPaymentStatus(1);
         order.setStatus(OrderStatusEnum.PENDING_SERVICE.getCode());
         this.updateById(order);
 
-        // 标记优惠券已使用
+        // 2. 标记优惠券已使用
         if (order.getCouponId() != null) {
             try {
                 Coupon coupon = couponMapper.selectById(order.getCouponId());
@@ -384,16 +406,19 @@ public class OrdersServiceImpl extends ServiceImpl<OrdersMapper, Orders> impleme
             } catch (Exception ignored) {}
         }
 
-        // 更新交易单状态
+        // 3. 更新交易单：状态、微信支付单号、支付完成时间
         trading.setStatus(1);
+        trading.setTransactionId(transactionId);
+        trading.setPayTime(LocalDateTime.now());
         tradingService.updateById(trading);
 
+        // 4. 发送站内通知
         try {
             notificationService.createNotification(userId, "支付成功",
                     "您的订单 #" + order.getId() + " 已支付成功，等待安排服务", "ORDER", order.getId());
         } catch (Exception ignored) {}
 
-        // 分销返利
+        // 5. 分销返利（邀请人返利 5%）
         try {
             User currentUser = userService.getById(userId);
             if (currentUser != null && currentUser.getInviterId() != null) {
