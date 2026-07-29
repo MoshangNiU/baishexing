@@ -1,4 +1,4 @@
-package com.yunlan.controller;
+package com.yunlan.controller.consumer;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.yunlan.common.Result;

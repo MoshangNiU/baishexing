@@ -1,4 +1,4 @@
-package com.yunlan.controller;
+package com.yunlan.controller.consumer;
 
 import com.yunlan.common.Result;
 import com.yunlan.entity.Area;

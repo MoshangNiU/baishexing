@@ -1,4 +1,4 @@
-package com.yunlan.controller;
+package com.yunlan.controller.consumer;
 
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;

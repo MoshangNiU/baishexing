@@ -26,6 +26,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
             "/market/consumer/activity/list",
             "/customer/consumer/evaluation/pageByTarget",
             "/customer/consumer/evaluation/countEvaluationByServeItemId",
+            "/pay/notify/**",
+            "/admin-api/auth/login",
             "/doc.html",
             "/swagger-resources/**",
             "/v2/api-docs",

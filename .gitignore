@@ -47,6 +47,3 @@ logs/
 # ===== Application sensitive configs =====
 src/main/resources/application-dev.yml
 src/main/resources/application-prod.yml
-
-# ===== Docker =====
-docker/data/

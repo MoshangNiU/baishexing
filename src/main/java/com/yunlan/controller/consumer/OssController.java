@@ -1,4 +1,4 @@
-package com.yunlan.controller;
+package com.yunlan.controller.consumer;
 
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
