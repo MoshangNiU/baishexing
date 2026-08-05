@@ -12,9 +12,11 @@ import com.yunlan.dto.ServeSearchDTO;
 import com.yunlan.dto.WorkerRecommendVO;
 import com.yunlan.dto.WorkerRegisterDTO;
 import com.yunlan.entity.Evaluation;
+import com.yunlan.entity.Orders;
 import com.yunlan.entity.ServeCategory;
 import com.yunlan.entity.ServeItem;
 import com.yunlan.mapper.EvaluationMapper;
+import com.yunlan.mapper.OrdersMapper;
 import com.yunlan.service.ServeCategoryService;
 import com.yunlan.service.ServeItemService;
 import com.yunlan.service.WorkerRecommendService;
@@ -46,6 +48,30 @@ public class ServiceController {
     @Resource
     private EvaluationMapper evaluationMapper;
 
+    @Resource
+    private OrdersMapper ordersMapper;
+
+    private void enrichWorkerStats(com.yunlan.entity.WorkerRecommend w) {
+        if (w == null || w.getId() == null) return;
+        Long serveCount = ordersMapper.selectCount(
+                new LambdaQueryWrapper<Orders>()
+                        .eq(Orders::getWorkerId, w.getId())
+                        .eq(Orders::getDeleted, 0));
+        w.setServeCount(serveCount != null ? serveCount.intValue() : 0);
+
+        List<Evaluation> evals = evaluationMapper.selectList(
+                new LambdaQueryWrapper<Evaluation>()
+                        .eq(Evaluation::getWorkerId, w.getId())
+                        .eq(Evaluation::getStatus, 1)
+                        .eq(Evaluation::getDeleted, 0));
+        if (evals != null && !evals.isEmpty()) {
+            double avg = evals.stream().mapToInt(e -> e.getStar() != null ? e.getStar() : 0).average().orElse(0.0);
+            w.setRating(BigDecimal.valueOf(avg).setScale(1, RoundingMode.HALF_UP));
+        } else {
+            w.setRating(BigDecimal.valueOf(5.0));
+        }
+    }
+
     @GetMapping("/firstPageServeList")
     @ApiOperation("首页服务图标列表（含子服务）")
     public Result<List<HomeServeVO>> getFirstPageServeList() {
@@ -54,7 +80,7 @@ public class ServiceController {
         for (ServeCategory cat : categories) {
             HomeServeVO vo = new HomeServeVO();
             vo.setServeTypeId(cat.getId());
-            vo.setServeTypeIcon(cat.getIcon());
+            vo.setServeTypeIcon(cat.getImage() != null && !cat.getImage().isEmpty() ? cat.getImage() : cat.getIcon());
             vo.setServeTypeName(cat.getName());
 
             List<ServeItem> items = serveItemService.lambdaQuery()
@@ -134,7 +160,7 @@ public class ServiceController {
             ServeTypeVO vo = new ServeTypeVO();
             vo.setServeTypeId(cat.getId());
             vo.setServeTypeName(cat.getName());
-            vo.setServeTypeImg(cat.getIcon());
+            vo.setServeTypeImg(cat.getImage() != null && !cat.getImage().isEmpty() ? cat.getImage() : cat.getIcon());
             return vo;
         }).collect(Collectors.toList());
         return Result.success(result);
@@ -143,7 +169,19 @@ public class ServiceController {
     @GetMapping("/workerRecommend")
     @ApiOperation("获取阿姨推荐列表")
     public Result<List<WorkerRecommendVO>> getWorkerRecommend(@RequestParam(required = false) Long regionId) {
-        return Result.success(workerRecommendService.getRecommendList(regionId));
+        List<WorkerRecommendVO> list = workerRecommendService.getRecommendList(regionId);
+        if (list != null) {
+            for (WorkerRecommendVO vo : list) {
+                com.yunlan.entity.WorkerRecommend w = new com.yunlan.entity.WorkerRecommend();
+                w.setId(vo.getId());
+                w.setServeCount(vo.getServeCount());
+                w.setRating(vo.getRating());
+                enrichWorkerStats(w);
+                vo.setServeCount(w.getServeCount());
+                vo.setRating(w.getRating());
+            }
+        }
+        return Result.success(list);
     }
 
     @GetMapping("/workerDetail/{id}")
@@ -153,6 +191,7 @@ public class ServiceController {
         if (wr == null) {
             return Result.error("阿姨不存在");
         }
+        enrichWorkerStats(wr);
         WorkerRecommendVO vo = new WorkerRecommendVO();
         vo.setId(wr.getId());
         vo.setName(wr.getName());

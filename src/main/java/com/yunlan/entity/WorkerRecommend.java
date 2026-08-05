@@ -14,6 +14,8 @@ public class WorkerRecommend {
 
     private String name;
 
+    private String phone;
+
     private String avatar;
 
     private Integer experienceYears;
@@ -31,6 +33,10 @@ public class WorkerRecommend {
     private Integer status;
 
     private Long regionId;
+
+    private String regionName;
+
+    private Long categoryId;
 
     private Integer sort;
 

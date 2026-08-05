@@ -11,6 +11,7 @@ public class ServeCategory {
     private Long id;
     private String name;
     private String icon;
+    private String image;
     private Integer sort;
     private Integer status;
 

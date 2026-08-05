@@ -28,6 +28,7 @@ public class Orders {
     private String cancelReason;
     private LocalDateTime cancelTime;
     private String serverName;
+    private Long workerId;
     private LocalDateTime serveActualEndTime;
     private LocalDateTime serveStartTime;
 

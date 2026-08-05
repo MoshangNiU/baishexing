@@ -8,6 +8,7 @@ import com.yunlan.service.NotificationService;
 import com.yunlan.utils.UserHolder;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -16,7 +17,7 @@ public class NotificationServiceImpl extends ServiceImpl<NotificationMapper, Not
     @Override
     public List<Notification> getNotificationPage(int page, int pageSize) {
         Long userId = UserHolder.get();
-        if (userId == null) return List.of();
+        if (userId == null) return new ArrayList<>();
 
         int offset = (page - 1) * pageSize;
         LambdaQueryWrapper<Notification> wrapper = new LambdaQueryWrapper<Notification>()

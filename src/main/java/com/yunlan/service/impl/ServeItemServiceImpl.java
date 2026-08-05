@@ -58,12 +58,25 @@ public class ServeItemServiceImpl extends ServiceImpl<ServeItemMapper, ServeItem
         vo.setPrice(item.getPrice());
         vo.setOriginalPrice(item.getOriginalPrice());
         vo.setUnit(item.getUnit());
+        vo.setDuration(item.getDuration());
+        vo.setScope(item.getScope());
+        vo.setTags(item.getTags());
+        vo.setNotice(item.getNotice());
         vo.setDescription(item.getDescription());
         vo.setDetailImg(item.getDetailImg());
-        // Build carousel images list from main image + detail image
+        // Build detail image list from comma-separated string
+        java.util.List<String> detailImgs = new java.util.ArrayList<>();
+        if (item.getDetailImg() != null && !item.getDetailImg().isEmpty()) {
+            for (String s : item.getDetailImg().split(",")) {
+                String t = s.trim();
+                if (!t.isEmpty()) detailImgs.add(t);
+            }
+        }
+        vo.setDetailImgList(detailImgs);
+        // Build carousel images list from main image + detail images
         java.util.List<String> imgs = new java.util.ArrayList<>();
         if (item.getImage() != null) imgs.add(item.getImage());
-        if (item.getDetailImg() != null) imgs.add(item.getDetailImg());
+        imgs.addAll(detailImgs);
         vo.setCarouselImages(imgs);
 
         // Compute serveCount and average rating from evaluations

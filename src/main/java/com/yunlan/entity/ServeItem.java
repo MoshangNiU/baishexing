@@ -16,6 +16,11 @@ public class ServeItem {
     private BigDecimal price;
     private BigDecimal originalPrice;
     private String unit;
+    private String duration;
+    private String scope;
+    private String tags;
+    private String notice;
+    private Integer sort;
     private String image;
     private String detailImg;
     private Integer hotStatus;
